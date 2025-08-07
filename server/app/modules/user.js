@@ -1,0 +1,625 @@
+// Import necessary modules and functions using 'require'
+const User = require("../models/User");
+const Department = require("../models/Department");
+const Designation = require("../models/Designation");
+const Attribute = require("../models/Attribute");
+const PerformanceAppraisal = require("../models/PerformanceAppraisal");
+const {hashPassword, comparePassword, createSessionToken, verifySessionToken, getNewPerformanceAppraisalStats} = require("../functions");
+const path = require('path');
+const fs = require("fs");
+const Role = require('../models/Role');
+const Survey = require('../models/Survey');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const {kEMAIL_USERNAME, kEMAIL_PASSWORD, kEMAIL_FROM} = require("../../constants");
+const {generateEmployeeId} = require('../functions');
+
+const checkDepartmentPermission = (user) => {
+    return user.role.permissions.some(permission =>
+        ['own_department'].includes(permission.name)
+    );
+};
+
+const getLastPerformanceReviewDate = async (employeeId) => {
+    const lastAppraisal = await PerformanceAppraisal.findOne({ employeeSelect: employeeId })
+                                .sort({ appraisalDate: -1 }) // Sort by date in descending order
+                                .lean();
+    return lastAppraisal ? lastAppraisal.appraisalDate : null;
+};
+
+async function sendEmail({ to, subject, text }) {
+    const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            user: kEMAIL_USERNAME,
+            pass: kEMAIL_PASSWORD
+        }
+    });
+
+    const mailOptions = {
+        from: kEMAIL_FROM,
+        to,
+        subject,
+        text
+    };
+
+    try {
+        const result = await transporter.sendMail(mailOptions);
+        console.log('Email sent:', result);
+        return result;
+    } catch (error) {
+        console.error('Error sending email:', error);
+        throw error;
+    }
+}
+
+// Exporting functions created using 'module.exports'
+module.exports = {
+    // Render avatar
+    avatar: async (req, res) => {
+        try {
+            // Get the username from the request parameters
+            const {usernameOrEmployeeId} = req.params;
+
+            // Find the user based on the provided username
+            let user = await User.findOne({
+                $or: [
+                    { username: usernameOrEmployeeId },
+                    { employeeId: usernameOrEmployeeId }
+                ]
+            });
+
+            if(!user) {
+                return res.status(404).send("Not found");
+            }
+
+            let profilePicturePath;
+
+            // Get user profile picture
+            if(user.profilePicture) {
+                profilePicturePath =  path.resolve(process.cwd(), "resources/uploads", user.profilePicture);
+            } else {
+                profilePicturePath = path.resolve(process.cwd(), "resources/public/img/user.jpg");
+            }
+
+            // Check profile picture existence
+            if(!fs.existsSync(profilePicturePath)) {
+                profilePicturePath = path.resolve(process.cwd(), "resources/public/img/user.jpg");
+            }
+
+            const file = fs.createReadStream(profilePicturePath);
+
+            file.pipe(res);
+        } catch (e) {
+            console.error(e);
+            return res.status(500).send("Internal server error");
+        }
+    },
+    // Checks to see whether user has logged in or not
+    postLogin: async (req, res) => {
+        let email = req.body.email;
+        let password = req.body.password;
+        
+        let user = await User.findOne({email: email});
+        if(!user) {
+            return res.json({success: false, message: "Invalid login credentials"});
+        }
+
+        let isMatch = await comparePassword(password, user.password);
+        if(!isMatch) {
+            return res.json({success: false, message: "Invalid login credentials"});
+        }
+
+        let sessionToken = await createSessionToken(user.username, user.role);
+
+        res.cookie("sessionToken", sessionToken, {
+            httpOnly: true,
+        });
+
+        return res.json({success: true, message: "Logged in successfully"});
+    },
+
+    // Handle logout
+    logout: (req, res) => {
+        res.clearCookie("sessionToken");
+
+        return res.json({success: true, message: "Logged out successfully"});
+    },
+
+    // Render 'register' page
+    register: async (req, res) => {
+        const departments = await Department.find().lean();
+        const designations = await Designation.find().lean();
+
+        return res.json({departments: departments, designations: designations});
+    },
+    // Handle registration form submission
+    postRegister: async (req, res) => {
+        let username = req.body.username;
+        let name = req.body.name;
+        let email = req.body.email;
+        let password = req.body.password;
+        let repeatPassword = req.body.repeatPassword;
+        let phone = req.body.phone;
+        let department = req.body.department;
+        let designation = req.body.designation;
+        let role = req.body.role;
+
+        if (!username || !name || !email || !password || !repeatPassword || !phone || !department || !designation || !role) {
+            return res.json({success: false, message: "Please fill in all fields"});
+        }
+
+        if(password !== repeatPassword) {
+            return res.json({success: false, message: "Passwords do not match"});
+        }
+
+        let employeeId = await generateEmployeeId();
+
+        let user = await User.findOne({email: email});
+
+        if(user) {
+            return res.json({success: false, message: "Email already exists"});
+        }
+
+        let hashedPassword = await hashPassword(password);
+
+        let depart = await Department.findOne({ departmentName: department });
+        let desig = await Designation.findOne({ name: designation });
+
+        await User.create({
+            employeeId: employeeId,
+            username: username,
+            name: name,
+            email: email,
+            password: hashedPassword,
+            phone: phone,
+            department: depart,
+            designation: desig,
+            role: role
+        });
+
+        return res.json({success: true, message: "User registered successfully"});
+    },
+
+
+    changePassword: async function (req, res) {
+        const { currentPassword, newPassword } = req.body;
+        const user = res.locals.user;
+    
+        try {
+            const isMatch = await comparePassword(currentPassword, user.password);
+            if (!isMatch) {
+                return res.json({ success: false, message: 'Current password is incorrect' });
+            }
+    
+            const hashedPassword = await hashPassword(newPassword);
+            await User.findByIdAndUpdate(user._id, { password: hashedPassword });
+    
+            return res.json({ success: true, message: 'Password changed successfully' });
+        } catch (error) {
+            console.error('Failed to change password:', error);
+            return res.status(500).json({ success: false, message: 'Failed to change password' });
+        }
+    },
+
+
+    forgotPassword: async (req, res) => {
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ success: false, message: "Email is required" });
+        }
+
+        try {
+            const user = await User.findOne({ email });
+            if (!user) {
+                return res.json({ success: true, message: "If the email is registered, you will receive a reset link." });
+            }
+
+            const resetToken = crypto.randomBytes(20).toString('hex');
+            user.resetPasswordToken = resetToken;
+            user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
+
+            await user.save();
+
+            const resetUrl = `${req.headers.origin}/reset-password/${resetToken}` || 'https://cckfm.marcusmarrio.com/reset-password';
+            const text = `You are receiving this because you (or someone else) have requested the reset of the password for your account.\n\n` +
+                        `Please click on the following link, or paste this into your browser to complete the process:\n\n` +
+                        `${resetUrl} \n\n` +
+                        `If you did not request this, please ignore this email and your password will remain unchanged.\n`;
+
+            await sendEmail({
+                to: user.email,
+                subject: 'Password Reset Request',
+                text
+            });
+
+            res.json({ success: true, message: "An email has been sent to your email address with further instructions." });
+        } catch (err) {
+            console.error('Error in forgotPassword:', err);
+            res.status(500).json({ success: false, message: "Server error" });
+        }
+    },
+
+    resetPassword: async (req, res) => {
+        const { token } = req.params;
+        const { password } = req.body;
+
+        try {
+            const user = await User.findOne({
+                resetPasswordToken: token,
+                resetPasswordExpires: { $gt: Date.now() }
+            });
+
+            if (!user) {
+                return res.status(400).json({ success: false, message: "Password reset token is invalid or has expired." });
+            }
+
+            user.password = password; 
+            user.resetPasswordToken = undefined;
+            user.resetPasswordExpires = undefined;
+
+            await user.save();
+
+            res.json({ success: true, message: "Your password has been updated." });
+        } catch (err) {
+            console.error(err);
+            res.status(500).json({ success: false, message: "Server error" });
+        }
+    },
+
+    getAvatar: async (req, res) => {
+        try {
+
+        } catch (e) {
+            console.error(e);
+            return res.status(500).send(e.message);
+        }
+    },
+
+
+    dashboard: async (req, res) => {
+        const user = res.locals.user;
+    
+        const superAdminRole = await Role.findOne({ name: 'Super Admin' }).lean();
+        const superAdminRoleId = superAdminRole._id;
+        let filter;
+        filter = { role: { $ne: superAdminRoleId } };
+    
+        if (user.department) {
+            user.department = await Department.findById(user.department);
+        }
+    
+        let appraisals = [];
+        let ownAppraisals;
+        const departmentPermission = checkDepartmentPermission(user);
+        if (departmentPermission) {
+            if (user.department) {
+                filter = { ...filter, department: user.department._id };
+                appraisals = await PerformanceAppraisal.find({
+                    "employeeDetails.department": user.department.departmentName
+                }).limit(5).lean();
+            } else {
+                filter = { ...filter, department: null };
+            }
+        } else {
+            appraisals = await PerformanceAppraisal.find({}).limit(5).lean();
+        }
+    
+        ownAppraisals = await PerformanceAppraisal.find({
+            employeeId: user._id
+        }).limit(5).lean();
+    
+        const extendedPerformanceAppraisals = appraisals.map(appraisal => ({
+            ...appraisal,
+            stats: getNewPerformanceAppraisalStats(appraisal)
+        }));
+    
+        const extendedOwnPerformanceAppraisals = ownAppraisals.map(appraisal => ({
+            ...appraisal,
+            stats: getNewPerformanceAppraisalStats(appraisal)
+        }));
+    
+        const employees = await User.find(filter)
+            .populate('department', 'departmentName')
+            .populate('designation', 'name')
+            .populate('role', 'name')
+            .limit(5)
+            .lean();
+    
+        const filteredEmployees = employees.filter(employee => employee.role.name !== 'super admin');
+    
+        const departments = await Department.find().limit(5).lean();
+        const designations = await Designation.find(filter)
+            .populate('department', 'departmentName')
+            .limit(5)
+            .lean();
+    
+        for (const employee of filteredEmployees) {
+            employee.lastAppraisalDate = await getLastPerformanceReviewDate(employee._id);
+        }
+        filteredEmployees.sort((a, b) => {
+            if (!a.lastAppraisalDate) return 1;
+            if (!b.lastAppraisalDate) return -1;
+            return new Date(b.lastAppraisalDate) - new Date(a.lastAppraisalDate);
+        });
+    
+        const attributes = await Attribute.find()
+            .populate('designation', 'name')
+            .populate('subAttributes', ['name', 'weight'])
+            .limit(5)
+            .lean();
+    
+        const remarksAppraisal = appraisals.map(appraisal => ({
+            appraisalId: appraisal._id,
+            username: appraisal.employeeDetails.name,
+            appraisalDate: appraisal.appraisalDate,
+            totalScore: getNewPerformanceAppraisalStats(appraisal)
+        }));
+    
+        const surveys = await Survey.find().limit(5).lean();
+    
+        const totalEmployees = await User.countDocuments(filter);
+        const totalDepartments = await Department.countDocuments();
+        const totalDesignations = await Designation.countDocuments(filter);
+        const totalAppraisal = await PerformanceAppraisal.countDocuments(filter);
+        const totalAttributes = await Attribute.countDocuments();
+
+        return res.json({
+            totalEmployees,
+            totalDepartments,
+            totalDesignations,
+            totalAppraisal,
+            totalAttributes,
+            employees: filteredEmployees,
+            departments,
+            designations,
+            appraisals: extendedPerformanceAppraisals,
+            ownAppraisals: extendedOwnPerformanceAppraisals,
+            attributes,
+            remarksAppraisal,
+            surveys,
+        });
+    },
+    
+
+    dashboardGraphs: async (req, res) => {
+        const user = res.locals.user;
+        
+        const superAdminRole = await Role.findOne({ name: 'Super Admin' }).lean();
+        const superAdminRoleId = superAdminRole._id;
+        let userFilter = {};
+        let appraisalFilter = {};
+        if (user.role.name !== 'Super Admin') {
+            userFilter.role = { $ne: superAdminRoleId };
+        }
+    
+        if (user.department) {
+            user.department = await Department.findById(user.department);
+        }
+    
+        // Check department permissions
+        const departmentPermission = checkDepartmentPermission(user);
+        if (departmentPermission) {
+            if (user.department) {
+                userFilter.department = user.department._id;
+                appraisalFilter['employeeDetails.department'] = user.department.departmentName;
+            } else {
+                userFilter.department = null;
+                appraisalFilter['employeeDetails.department'] = null;
+            }
+        } 
+    
+        // Aggregate for employee counts by department
+        const employeeCountsByDepartment = {};
+        const employeeCounts = await User.aggregate([
+            { $match: { 'role.name': { $ne: 'Super Admin' } } }, // Exclude super admin
+            { $group: { _id: "$department", count: { $sum: 1 } } },
+            {
+                $lookup: {
+                    from: "departments",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "departmentInfo"
+                }
+            },
+            { $unwind: "$departmentInfo" },
+            {
+                $project: {
+                    _id: 1,
+                    count: 1,
+                    departmentName: "$departmentInfo.departmentName",
+                    createdAt: "$departmentInfo.createdAt"
+                }
+            },
+            { $sort: { count: -1, createdAt: 1 } } // Sort by count descending and createdAt ascending
+        ]);
+    
+        employeeCounts.forEach(item => {
+            if (item.departmentName) {
+                employeeCountsByDepartment[item.departmentName] = item.count;
+            }
+        });
+    
+        // Aggregate for appraisal counts by month
+        const appraisalCountsByMonth = await PerformanceAppraisal.aggregate([
+            { $match: appraisalFilter }, // Apply filter here
+            {
+                $project: {
+                    // Ensure appraisalDate is treated as a date
+                    convertedDate: {
+                        $cond: {
+                            if: { $eq: [{ $type: "$appraisalDate" }, "date"] },
+                            then: "$appraisalDate",
+                            else: { $dateFromString: { dateString: "$appraisalDate", format: "%Y-%m-%d" } }
+                        }
+                    }
+                }
+            },
+            {
+                $project: {
+                    month: { $month: "$convertedDate" },
+                    year: { $year: "$convertedDate" }
+                }
+            },
+            {
+                $group: {
+                    _id: { month: "$month", year: "$year" },
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { "_id.year": 1, "_id.month": 1 }
+            }
+        ]);
+    
+        // Aggregate for employee growth data
+        const employeeGrowthData = await User.aggregate([
+            { $match: userFilter },
+            {
+                $project: {
+                    month: { $month: "$createdAt" },
+                    year: { $year: "$createdAt" }
+                }
+            },
+            {
+                $group: {
+                    _id: { month: "$month", year: "$year" },
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { "_id.year": 1, "_id.month": 1 }
+            }
+        ]);
+    
+        // Aggregate for top performers
+        const topPerformers = await PerformanceAppraisal.aggregate([
+            { $match: appraisalFilter }, // Apply filter here
+            {
+                $project: {
+                    employeeId: 1,
+                    attributePercentageCarry: 1,
+                    appraisalData: 1
+                }
+            },
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "employeeId",
+                    foreignField: "_id",
+                    as: "employeeInfo"
+                }
+            },
+            { $unwind: "$employeeInfo" },
+            {
+                $project: {
+                    employeeId: 1,
+                    employeeInfo: {
+                        name: "$employeeInfo.name",
+                        employeeId: "$employeeInfo.employeeId",
+                        department: "$employeeInfo.department",
+                        designation: "$employeeInfo.designation"
+                    },
+                    attributePercentageCarry: 1,
+                    appraisalData: 1
+                }
+            }
+        ]);
+    
+        // Calculate stats for each top performer and sort by total score
+        const topPerformersStats = topPerformers.map(performanceAppraisal => {
+            const stats = getNewPerformanceAppraisalStats(performanceAppraisal);
+            return {
+                ...performanceAppraisal,
+                stats
+            };
+        }).sort((a, b) => b.stats.totalScore - a.stats.totalScore).slice(0, 5);
+
+        return res.json({
+            employeeCountsByDepartment,
+            appraisalCountsByMonth,
+            employeeGrowthData,
+            topPerformers: topPerformersStats
+        });
+    },       
+    
+
+
+    impersonate: async (req, res) => {
+        const { role } = req.body;
+        const user = res.locals.user;
+    
+        if (user.role === 'Admin' || user.realRole === 'Admin') {
+            // If the real role is not already set, set it to the current role (Admin)
+            const updateData = { role: role };
+            if (!user.realRole) {
+                updateData.realRole = user.role;
+            }
+    
+            // Update the user in the database
+            await User.findByIdAndUpdate(user._id, updateData);
+
+            return res.json({success: true, message: "Impersonated successfully"});
+        } else {
+            res.status(403).send('Unauthorized');
+        }
+    },
+    
+
+    stopImpersonate: async (req, res) => {
+        const user = res.locals.user;
+    
+        if (user.realRole === 'Admin') {
+            // Revert to the original admin role
+            await User.findByIdAndUpdate(user._id, { role: user.realRole, realRole: null });
+
+            return res.json({success: true, message: "Stopped impersonating successfully"});
+        } else {
+            res.status(403).send('Unauthorized');
+        }
+    },
+    needsLogin: (requiredAccess = []) => {
+        return async (req, res, next) => {
+            let sessionToken = req.cookies["sessionToken"];
+
+            if (!sessionToken) {
+                return res.status(401).json({success: false, message: "Unauthorized"});
+            }
+
+            let session = await verifySessionToken(sessionToken);
+            if (!session) {
+                return res.status(401).json({success: false, message: "Unauthorized"});
+            }
+
+            const user = await User.findOne({ username: session.username })
+                .populate({
+                    path: 'role',
+                    populate: {
+                        path: 'permissions',
+                    },
+                })
+                .lean();
+
+            if (!user || !user.role) {
+                return res.status(401).json({success: false, message: "Unauthorized"});
+            }
+
+            res.locals.userPermissions = user.role.permissions.map(permission => ({
+                name: permission.name,
+                module: permission.module
+            }));
+
+            // Check if the user has the required access
+            let hasAccess = requiredAccess.length === 0 || requiredAccess.includes("Self") ||
+                            user.role.permissions.some(permission =>
+                                requiredAccess.includes(permission.module) || requiredAccess.includes(permission.name));
+
+            if (hasAccess) {
+                res.locals.user = user; // Make user data globally available to templates
+                next();
+            } else {
+                return res.status(403).json({success: false, message: "Access Denied"});
+            }
+        };
+    }
+}

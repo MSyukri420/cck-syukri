@@ -1,0 +1,17 @@
+# Frontend deployment reflects to backend refresh
+name: Execute backend rebuild
+on:
+  push:
+    branches:
+      - master
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger backend build
+        run: |
+          curl -X POST \
+          -H "Accept: application/vnd.github.v3+json" \
+          -H "Authorization: token ${{ secrets.BUILDER_TOKEN }}" \
+          https://api.github.com/repos/Group-6-FYP/cck-hrpms/dispatches \
+          -d '{"event_type": "trigger_build"}'

@@ -1,0 +1,29 @@
+{
+  "name": "cck-hrpms",
+  "version": "1.0.0",
+  "description": "Human Resource Performance Measure System for CCK Group",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Group 6 Software Engineering SUTS 2023",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "csv": "^6.3.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "handlebars": "^4.7.8",
+    "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.1",
+    "mongodb": "^6.1.0",
+    "mongoose": "^7.6.11",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.9.13",
+    "puppeteer": "^21.3.6",
+    "winston": "^3.11.0"
+  }
+}

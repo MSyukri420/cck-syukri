@@ -1,0 +1,122 @@
+# Action dispatcher for backend building
+name: Project Builder
+on:
+  repository_dispatch:
+    types: [trigger_build] # Listen to the trigger_build event from the frontend repository
+  push:
+    branches:
+      - master # Listen to push events from the backend repository
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Checkout backend code
+      uses: actions/checkout@master
+
+    - name: Checkout frontend code
+      uses: actions/checkout@master
+      with:
+        repository: Group-6-FYP/cck-hrpms-react
+        token: ${{ secrets.BUILDER_TOKEN }}
+        path: frontend
+
+    - name: Setup NodeJS
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install frontend dependencies
+      run: npm install
+      working-directory: ./frontend
+
+    - name: Build frontend
+      run: npm run build
+      working-directory: ./frontend
+
+    - name: Copy from frontend build to backend
+      run: |
+        find ./resources/public/ -maxdepth 1 -type f -delete
+        cp -r ./frontend/dist/assets/* ./resources/public/
+        cp -r ./frontend/dist/index.html ./resources/views/
+        rm -r frontend
+
+    - name: Check if there are any changes
+      id: verify_diff
+      run: |
+        git diff --quiet . || echo "changed=true" >> $GITHUB_OUTPUT
+
+    - name: Push changes to backend
+      if: steps.verify_diff.outputs.changed == 'true'
+      run: |
+        git pull
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+        git add .
+        git commit -m "Update frontend build"
+        git push origin master
+
+    - name: Build Docker image
+      run: docker build -t group6fyp/cck-hrpms -t group6fyp/cck-hrpms:${{ github.sha }} .
+
+    - name: Login to DockerHub
+      uses: docker/login-action@master
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Push Docker image
+      run: docker push group6fyp/cck-hrpms
+
+    - name: Create temporary .env file
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.FTP_SERVER }}
+        username: ${{ secrets.FTP_USERNAME }}
+        password: ${{ secrets.FTP_PASSWORD }}
+        port: 7822
+        script: |
+              mkdir -p cck-hrpms
+              cd cck-hrpms
+              echo "PORT=${{ secrets.PORT }}" >> .env
+              echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" >> .env
+              echo "MONGODB_NAME=${{ secrets.MONGODB_NAME }}" >> .env
+              echo "NODE_ENV=${{ secrets.NODE_ENV }}" >> .env
+              echo "BASE_URL=${{ secrets.BASE_URL }}" >> .env
+              echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> .env
+              echo "SMTP_HOST=${{ secrets.SMTP_HOST }}" >> .env
+              echo "SMTP_PORT=${{ secrets.SMTP_PORT }}" >> .env
+              echo "SMTP_USER=${{ secrets.SMTP_USER }}" >> .env
+              echo "SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }}" >> .env
+              echo "APP_NAME=${{ secrets.APP_NAME }}" >> .env
+
+    - name: Upload docker-compose.yml into the server
+      uses: appleboy/scp-action@master
+      with:
+          host: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          port: 7822
+          source: docker-compose.yml
+          target: cck-hrpms
+          overwrite: true
+
+  deploy:
+    name: Deploy to remote server
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Access SSH
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.FTP_SERVER }}
+        username: ${{ secrets.FTP_USERNAME }}
+        password: ${{ secrets.FTP_PASSWORD }}
+        port: 7822
+        script: |
+          cd cck-hrpms &&
+          docker compose pull &&
+          docker compose up --force-recreate --build -d &&
+          docker image prune -f &&
+          rm -rf .env &&
+          cd ..
