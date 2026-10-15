@@ -3,15 +3,18 @@ const Attribute = require("../models/Attribute");
 const PerformanceAppraisal = require("../models/PerformanceAppraisal");
 const Designation = require("../models/Designation");
 const Department = require("../models/Department");
-const {getNewPerformanceAppraisalStats, createAppraisalPdf, createEmailTemplate, sendMail, notifyUser} = require("../functions");
+const {getNewPerformanceAppraisalStats, createAppraisalPdf, createEmailTemplate, sendMail, notifyUser, appraisalAccess} = require("../functions");
 const path = require("path");
 const fs = require("fs");
+const {t} = require("../i18n");
 
 module.exports = {
     getEmployeeNames: async function (req, res) {
         try {
+            // Heads of department only appraise people in their own department
+            const access = await appraisalAccess(res);
             let employees = await User
-                .find({}, "name _id role")
+                .find(access.departmentId === undefined ? {} : {department: access.departmentId}, "name _id role")
                 .populate("role")
                 .lean();
 
@@ -31,6 +34,19 @@ module.exports = {
                 .populate("designation")
                 .populate("jobGrade");
 
+            if (!employee) {
+                return res.status(404).json({success: false, message: t(req, "employeeNotFound")});
+            }
+
+            const access = await appraisalAccess(res);
+            if (!access.inScope(employee.department?.departmentName)) {
+                return res.status(403).json({success: false, message: t(req, "appraiseOwnDepartmentOnly")});
+            }
+
+            if (!employee.designation || !employee.jobGrade) {
+                return res.status(400).json({success: false, message: t(req, "employeeNotReadyForAppraisal")});
+            }
+
             // Get appraisal input data
             const attributes = await Attribute.find({
                 designation: employee.designation._id,
@@ -41,40 +57,6 @@ module.exports = {
         } catch (e) {
             console.error(e);
             return res.status(500).json({success: false, message: "Error getting employee details."})
-        }
-    },
-    createDesignation: async function (req, res) {
-        try {
-            const {designationName, departmentId, lead} = req.body;
-
-            // Check if designation already exists
-            const designationExists = await Designation.findOne({name: designationName});
-
-            if (designationExists) {
-                return res.status(400).json({success: false, message: "Designation already exists."});
-            }
-
-            const designation = new Designation({
-                name: designationName,
-                department: departmentId,
-            });
-
-            await designation.save();
-
-            if(lead) {
-                const department = await Department.findById(departmentId);
-
-                if(department.leadDesignation) {
-                    return res.status(400).json({success: false, message: "Department already has a lead designation."});
-                }
-
-                department.leadDesignation = designation._id;
-                await department.save();
-            }
-
-            return res.status(200).json({success: true, message: "Designation created successfully."});
-        } catch (e) {
-            return res.status(500).json({success: false, message: "Error creating designation."})
         }
     },
     createAttribute: async function (req, res) {
@@ -122,6 +104,14 @@ module.exports = {
                 .populate("surveyId")
                 .lean();
 
+            if (!appraisal) {
+                return res.status(404).json({success: false, message: t(req, "appraisalNotFound")});
+            }
+
+            if (!(await appraisalAccess(res)).canView(appraisal)) {
+                return res.status(403).json({success: false, message: t(req, "appraisalViewDenied")});
+            }
+
             // Process stats
             appraisal = Object.assign(appraisal, {stats: getNewPerformanceAppraisalStats(appraisal)});
 
@@ -135,41 +125,24 @@ module.exports = {
         const { employeeId } = req.params;
     
         try {
-            // Check if user has permission for own department or all
-            let onlyOwnDepartment = res.locals.userPermissions.some(permission =>
-                ['own_department'].includes(permission.name)
-            );
-    
-            let appraisals;
-            let userData = await User.findOne({ employeeId: res.locals.user.employeeId }, { password: 0 })
-                .populate('department', 'departmentName')
-                .populate('designation', 'name')
-                .populate('role', 'name')
-                .populate('jobGrade', 'jobGradeName')
-                .lean();
-    
-            if (employeeId) {
-                // Fetch appraisals for the specific employee
-                if (onlyOwnDepartment) {
-                    appraisals = await PerformanceAppraisal.find({
-                        "employeeDetails.employeeId": employeeId,
-                        "employeeDetails.department": userData.department.departmentName
-                    });
-                } else {
-                    appraisals = await PerformanceAppraisal.find({
-                        "employeeDetails.employeeId": employeeId
-                    });
-                }
-            } else {
-                // Fetch appraisals for the whole department or all appraisals
-                if (onlyOwnDepartment) {
-                    appraisals = await PerformanceAppraisal.find({
-                        "employeeDetails.department": userData.department.departmentName
-                    });
-                } else {
-                    appraisals = await PerformanceAppraisal.find({});
-                }
+            const access = await appraisalAccess(res);
+            const ownEmployeeId = res.locals.user.employeeId;
+
+            // Non-managers only ever see their own appraisals
+            if (!access.isManager && employeeId && employeeId !== ownEmployeeId) {
+                return res.status(403).json({ success: false, message: t(req, "ownAppraisalsOnly") });
             }
+
+            const filter = {};
+            if (!access.isManager) {
+                filter["employeeDetails.employeeId"] = ownEmployeeId;
+            } else {
+                if (employeeId) filter["employeeDetails.employeeId"] = employeeId;
+                // Managers limited to their department (heads of department) see only that department
+                if (access.departmentName !== undefined) filter["employeeDetails.department"] = access.departmentName;
+            }
+
+            const appraisals = await PerformanceAppraisal.find(filter);
     
             // Create and extend performance appraisal stats
             const extendedPerformanceAppraisals = appraisals.map(appraisal => {
@@ -203,6 +176,19 @@ module.exports = {
                 .populate("designation", "name")
                 .populate("department", "_id departmentName leadDesignation")
                 .populate("jobGrade", "jobGradeName");
+
+            if (!employee) {
+                return res.status(404).json({success: false, message: t(req, "employeeNotFound")});
+            }
+            if (employee._id.equals(res.locals.user._id)) {
+                return res.status(403).json({success: false, message: t(req, "cannotAppraiseSelf")});
+            }
+            if (!(await appraisalAccess(res)).inScope(employee.department?.departmentName)) {
+                return res.status(403).json({success: false, message: t(req, "appraiseOwnDepartmentOnly")});
+            }
+            if (!employee.department || !employee.designation || !employee.jobGrade) {
+                return res.status(400).json({success: false, message: t(req, "employeeNotReadyForAppraisal")});
+            }
 
             // Create employee details object
             const employeeDetails = {
@@ -279,6 +265,8 @@ module.exports = {
                 );
             })().then(() => {
                 console.log("Email sent.");
+            }).catch(e => {
+                console.error(e);
             });
 
             return res.status(200).json({success: true, message: "Appraisal created successfully."});
@@ -305,7 +293,11 @@ module.exports = {
             const oldAppraisal = await PerformanceAppraisal.findById(performanceAppraisalId).populate("employeeId");
 
             if(!oldAppraisal) {
-                return res.status(404).json({success: false, message: "Appraisal not found."});
+                return res.status(404).json({success: false, message: t(req, "appraisalNotFound")});
+            }
+
+            if (!(await appraisalAccess(res)).canManage(oldAppraisal)) {
+                return res.status(403).json({success: false, message: t(req, "appraisalChangeDenied")});
             }
 
             // Update appraisal data
@@ -348,6 +340,8 @@ module.exports = {
                 );
             })().then(() => {
                 console.log("Email sent.");
+            }).catch(e => {
+                console.error(e);
             });
 
             return res.status(200).json({success: true, message: "Appraisal updated successfully."});
@@ -363,7 +357,11 @@ module.exports = {
             const appraisal = await PerformanceAppraisal.findById(performanceAppraisalId);
 
             if(!appraisal) {
-                return res.status(404).json({success: false, message: "Appraisal not found."});
+                return res.status(404).json({success: false, message: t(req, "appraisalNotFound")});
+            }
+
+            if (!(await appraisalAccess(res)).canView(appraisal)) {
+                return res.status(403).json({success: false, message: t(req, "appraisalViewDenied")});
             }
 
             let pdfPath = path.resolve(process.cwd(), "resources/uploads", `${appraisal.pdf}`);
@@ -389,7 +387,11 @@ module.exports = {
             const appraisal = await PerformanceAppraisal.findById(performanceAppraisalId);
 
             if(!appraisal) {
-                return res.status(404).json({success: false, message: "Appraisal not found."});
+                return res.status(404).json({success: false, message: t(req, "appraisalNotFound")});
+            }
+
+            if (!(await appraisalAccess(res)).canManage(appraisal)) {
+                return res.status(403).json({success: false, message: t(req, "appraisalDeleteDenied")});
             }
 
             const pdfPath = path.resolve(process.cwd(), "resources/uploads", `${appraisal.pdf}`);
@@ -416,7 +418,7 @@ module.exports = {
             const appraisal = await PerformanceAppraisal.findById(performanceAppraisalId);
 
             if(!appraisal) {
-                return res.status(404).json({success: false, message: "Appraisal not found."});
+                return res.status(404).json({success: false, message: t(req, "appraisalNotFound")});
             }
 
             if(appraisal.employeeId.toString() !== res.locals.user._id.toString()) {

@@ -86,6 +86,14 @@ const AuthenticationProvider = ({children}) => {
             return data;
         } catch (e) {
             console.error(e);
+            // e.g. 429 after too many failed attempts; the login page shows this message
+            const offlineMessage = {
+                'Bahasa Melayu': "Tidak dapat menghubungi pelayan. Sila cuba lagi.",
+                '中文': "无法连接到服务器。请重试。",
+            };
+            let language = 'English';
+            try { language = localStorage.getItem('language') || 'English'; } catch (storageError) { /* storage unavailable */ }
+            return e.response?.data || {success: false, message: offlineMessage[language] || "Could not reach the server. Please try again."};
         }
     }
 

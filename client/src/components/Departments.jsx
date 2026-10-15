@@ -239,7 +239,7 @@ const Departments = () => {
                     platformCtx.setAlert({type: "success", message: languageMap[platformCtx.language].deleteDepartmentSuccess});
                     setLoading(true); // to refetch the department list
                 } else {
-                    platformCtx.setAlert({type: "danger", message: languageMap[platformCtx.language].deleteDepartmentError});
+                    platformCtx.setAlert({type: "danger", message: data.message || languageMap[platformCtx.language].deleteDepartmentError});
                 }
                 modalRef.current.closeModal();
             } catch (error) {

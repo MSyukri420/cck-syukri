@@ -100,7 +100,7 @@ const RolesPermissions = () => {
                 alert('Role deleted successfully');
             } catch (error) {
                 console.error('Failed to delete role:', error);
-                alert('Failed to delete role');
+                alert(error.response?.data?.message || 'Failed to delete role');
             }
         }
     };

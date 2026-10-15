@@ -10,9 +10,45 @@ const fs = require("fs");
 const Role = require('../models/Role');
 const Survey = require('../models/Survey');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
-const {kEMAIL_USERNAME, kEMAIL_PASSWORD, kEMAIL_FROM} = require("../../constants");
+const RateLimit = require('../models/RateLimit');
+const {t} = require('../i18n');
+const transporter = require('../mail-config');
+const {kEMAIL_FROM, kEMAIL_USERNAME, kSMTP_USER, kAPP_URL} = require("../../constants");
 const {generateEmployeeId} = require('../functions');
+
+// Counts attempts per key within a time window. Stored in MongoDB (see models/RateLimit.js), so limits
+// survive restarts and apply across every copy of the server.
+function attemptLimiter({ name, max, windowMs }) {
+    const idFor = (key) => `${name}:${key}`;
+    return {
+        // Minutes until the key may try again, or 0 when it isn't blocked
+        blockedFor: async (key) => {
+            const entry = await RateLimit.findById(idFor(key)).lean();
+            if (!entry || entry.expiresAt <= new Date() || entry.count < max) return 0;
+            return Math.ceil((entry.expiresAt.getTime() - Date.now()) / 60000);
+        },
+        record: async (key) => {
+            const now = new Date();
+            // MongoDB removes expired counters within about a minute; restart any that have expired already
+            await RateLimit.updateOne({ _id: idFor(key), expiresAt: { $lte: now } }, { $set: { count: 0, expiresAt: new Date(now.getTime() + windowMs) } });
+            await RateLimit.updateOne(
+                { _id: idFor(key) },
+                { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date(now.getTime() + windowMs) } },
+                { upsert: true },
+            );
+        },
+        reset: (key) => RateLimit.deleteOne({ _id: idFor(key) }),
+    };
+}
+
+// Failed logins: 10 per email from one address, and 50 per address across all emails, per 15 minutes
+const failedLoginsPerAccount = attemptLimiter({ name: "login-account", max: 10, windowMs: 15 * 60 * 1000 });
+const failedLoginsPerAddress = attemptLimiter({ name: "login-address", max: 50, windowMs: 15 * 60 * 1000 });
+// Password reset emails: 5 requests per address per 15 minutes
+const resetRequestsPerAddress = attemptLimiter({ name: "reset-address", max: 5, windowMs: 15 * 60 * 1000 });
+
+// Reset tokens are stored hashed so a database leak doesn't expose working reset links
+const hashResetToken = (token) => crypto.createHash("sha256").update(String(token)).digest("hex");
 
 const checkDepartmentPermission = (user) => {
     return user.role.permissions.some(permission =>
@@ -28,16 +64,8 @@ const getLastPerformanceReviewDate = async (employeeId) => {
 };
 
 async function sendEmail({ to, subject, text }) {
-    const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            user: kEMAIL_USERNAME,
-            pass: kEMAIL_PASSWORD
-        }
-    });
-
     const mailOptions = {
-        from: kEMAIL_FROM,
+        from: kEMAIL_FROM || kSMTP_USER || kEMAIL_USERNAME,
         to,
         subject,
         text
@@ -87,9 +115,8 @@ module.exports = {
                 profilePicturePath = path.resolve(process.cwd(), "resources/public/img/user.jpg");
             }
 
-            const file = fs.createReadStream(profilePicturePath);
-
-            file.pipe(res);
+            // sendFile sets the image's Content-Type from its extension
+            return res.sendFile(profilePicturePath);
         } catch (e) {
             console.error(e);
             return res.status(500).send("Internal server error");
@@ -97,18 +124,31 @@ module.exports = {
     },
     // Checks to see whether user has logged in or not
     postLogin: async (req, res) => {
-        let email = req.body.email;
-        let password = req.body.password;
-        
+        // Strings only, so a JSON object like {"$ne": null} can't be used as a query operator
+        let email = String(req.body.email || "").trim();
+        let password = String(req.body.password || "");
+
+        const accountKey = `${req.ip}|${email.toLowerCase()}`;
+        const waitMinutes = Math.max(await failedLoginsPerAccount.blockedFor(accountKey), await failedLoginsPerAddress.blockedFor(req.ip));
+        if (waitMinutes > 0) {
+            return res.status(429).json({success: false, message: t(req, "loginLocked", {minutes: waitMinutes})});
+        }
+        const loginFailed = async () => {
+            await failedLoginsPerAccount.record(accountKey);
+            await failedLoginsPerAddress.record(req.ip);
+            return res.json({success: false, message: t(req, "invalidLogin")});
+        };
+
         let user = await User.findOne({email: email});
         if(!user) {
-            return res.json({success: false, message: "Invalid login credentials"});
+            return loginFailed();
         }
 
         let isMatch = await comparePassword(password, user.password);
         if(!isMatch) {
-            return res.json({success: false, message: "Invalid login credentials"});
+            return loginFailed();
         }
+        await failedLoginsPerAccount.reset(accountKey);
 
         let sessionToken = await createSessionToken(user.username, user.role);
 
@@ -161,7 +201,14 @@ module.exports = {
             return res.json({success: false, message: "Email already exists"});
         }
 
-        let hashedPassword = await hashPassword(password);
+        // Only a Super Admin may create another Super Admin
+        let selectedRole = await Role.findById(role).lean();
+        if (!selectedRole) {
+            return res.json({success: false, message: "Role not found"});
+        }
+        if (selectedRole.name === "Super Admin" && res.locals.user.role.name !== "Super Admin") {
+            return res.status(403).json({success: false, message: t(req, "roleNotAllowed")});
+        }
 
         let depart = await Department.findOne({ departmentName: department });
         let desig = await Designation.findOne({ name: designation });
@@ -171,11 +218,11 @@ module.exports = {
             username: username,
             name: name,
             email: email,
-            password: hashedPassword,
+            password: password, // hashed by the User pre-save hook
             phone: phone,
             department: depart,
             designation: desig,
-            role: role
+            role: selectedRole._id
         });
 
         return res.json({success: true, message: "User registered successfully"});
@@ -204,10 +251,17 @@ module.exports = {
 
 
     forgotPassword: async (req, res) => {
-        const { email } = req.body;
+        const email = req.body.email ? String(req.body.email).trim() : "";
         if (!email) {
             return res.status(400).json({ success: false, message: "Email is required" });
         }
+
+        // Limit reset emails per address so the form can't be used to flood someone's inbox
+        const waitMinutes = await resetRequestsPerAddress.blockedFor(req.ip);
+        if (waitMinutes > 0) {
+            return res.status(429).json({ success: false, message: t(req, "resetLimited", {minutes: waitMinutes}) });
+        }
+        await resetRequestsPerAddress.record(req.ip);
 
         try {
             const user = await User.findOne({ email });
@@ -216,12 +270,13 @@ module.exports = {
             }
 
             const resetToken = crypto.randomBytes(20).toString('hex');
-            user.resetPasswordToken = resetToken;
+            user.resetPasswordToken = hashResetToken(resetToken);
             user.resetPasswordExpires = Date.now() + 3600000; // 1 hour
 
             await user.save();
 
-            const resetUrl = `${req.headers.origin}/reset-password/${resetToken}` || 'https://cckfm.marcusmarrio.com/reset-password';
+            // Built from configuration, not request headers, so a forged Origin cannot redirect the reset link
+            const resetUrl = `${kAPP_URL}/reset-password/${resetToken}`;
             const text = `You are receiving this because you (or someone else) have requested the reset of the password for your account.\n\n` +
                         `Please click on the following link, or paste this into your browser to complete the process:\n\n` +
                         `${resetUrl} \n\n` +
@@ -244,9 +299,13 @@ module.exports = {
         const { token } = req.params;
         const { password } = req.body;
 
+        if (!password || String(password).length < 6) {
+            return res.status(400).json({ success: false, message: t(req, "passwordTooShort") });
+        }
+
         try {
             const user = await User.findOne({
-                resetPasswordToken: token,
+                resetPasswordToken: hashResetToken(token),
                 resetPasswordExpires: { $gt: Date.now() }
             });
 
@@ -291,18 +350,21 @@ module.exports = {
     
         let appraisals = [];
         let ownAppraisals;
+        let appraisalFilter = {};
         const departmentPermission = checkDepartmentPermission(user);
         if (departmentPermission) {
             if (user.department) {
                 filter = { ...filter, department: user.department._id };
-                appraisals = await PerformanceAppraisal.find({
-                    "employeeDetails.department": user.department.departmentName
-                }).limit(5).lean();
+                appraisalFilter = { "employeeDetails.department": user.department.departmentName };
             } else {
                 filter = { ...filter, department: null };
+                appraisalFilter = { "employeeDetails.department": null };
             }
-        } else {
-            appraisals = await PerformanceAppraisal.find({}).limit(5).lean();
+        }
+
+        // Other people's appraisals only for roles whose dashboard shows them
+        if (res.locals.userPermissions.some(permission => permission.name === 'appraisals_table')) {
+            appraisals = await PerformanceAppraisal.find(appraisalFilter).limit(5).lean();
         }
     
         ownAppraisals = await PerformanceAppraisal.find({
@@ -361,7 +423,7 @@ module.exports = {
         const totalEmployees = await User.countDocuments(filter);
         const totalDepartments = await Department.countDocuments();
         const totalDesignations = await Designation.countDocuments(filter);
-        const totalAppraisal = await PerformanceAppraisal.countDocuments(filter);
+        const totalAppraisal = await PerformanceAppraisal.countDocuments(appraisalFilter);
         const totalAttributes = await Attribute.countDocuments();
 
         return res.json({
@@ -412,7 +474,7 @@ module.exports = {
         // Aggregate for employee counts by department
         const employeeCountsByDepartment = {};
         const employeeCounts = await User.aggregate([
-            { $match: { 'role.name': { $ne: 'Super Admin' } } }, // Exclude super admin
+            { $match: userFilter }, // Excludes super admins, and limits heads of department to their own department
             { $group: { _id: "$department", count: { $sum: 1 } } },
             {
                 $lookup: {
@@ -526,8 +588,9 @@ module.exports = {
             }
         ]);
     
-        // Calculate stats for each top performer and sort by total score
-        const topPerformersStats = topPerformers.map(performanceAppraisal => {
+        // Calculate stats for each top performer and sort by total score; names and scores only for roles that show them
+        const canSeeTopPerformers = res.locals.userPermissions.some(permission => permission.name === 'topPerformers_graph');
+        const topPerformersStats = (canSeeTopPerformers ? topPerformers : []).map(performanceAppraisal => {
             const stats = getNewPerformanceAppraisalStats(performanceAppraisal);
             return {
                 ...performanceAppraisal,
@@ -618,7 +681,7 @@ module.exports = {
                 res.locals.user = user; // Make user data globally available to templates
                 next();
             } else {
-                return res.status(403).json({success: false, message: "Access Denied"});
+                return res.status(403).json({success: false, message: t(req, "accessDenied")});
             }
         };
     }

@@ -247,7 +247,13 @@ const JobGrades = () => {
 
         const onConfirm = async () => {
             try {
-                await axios.post('/jobgrade/delete', { jobGradeId }, { headers: { client: 'react' } });
+                const deleteResponse = await axios.post('/jobgrade/delete', { jobGradeId }, { headers: { client: 'react' } });
+                // The server refuses while employees still have this job grade; show its reason
+                if (!deleteResponse.data.success) {
+                    platformCtx.setAlert({ type: 'danger', message: deleteResponse.data.message || languageMap[platformCtx.language].deleteJobGradeFailed });
+                    modalRef.current.closeModal();
+                    return;
+                }
                 // Refetch job grades after deletion
                 const response = await axios.get('/jobgrades', { headers: { client: 'react' } });
                 setJobGrades(response.data.jobgrades);

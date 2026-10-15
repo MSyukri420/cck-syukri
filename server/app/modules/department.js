@@ -1,5 +1,7 @@
 const Department = require("../models/Department");
 const User = require("../models/User");
+const Designation = require("../models/Designation");
+const {t} = require("../i18n");
 
 module.exports = {
     // Define a route handler function for the "departments" route
@@ -88,6 +90,15 @@ module.exports = {
         const { departmentId } = req.body;
 
         try {
+            // Refuse while anything still belongs to the department, so no employee is left pointing at nothing
+            const [employees, designations] = await Promise.all([
+                User.countDocuments({ department: departmentId }),
+                Designation.countDocuments({ department: departmentId }),
+            ]);
+            if (employees > 0 || designations > 0) {
+                return res.json({success: false, message: t(req, "departmentInUse", {employees, designations})});
+            }
+
             await Department.findByIdAndDelete(departmentId);
 
             return res.json({success: true, message: "Department deleted successfully"});

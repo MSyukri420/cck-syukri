@@ -1,0 +1,31 @@
+# Runs the app and MongoDB together:   docker compose up -d --build
+# Configure it in server/.env first (copy server/.env.example). The site is then on http://localhost:3000
+# Set APP_PORT to publish it on a different port, e.g.  APP_PORT=8080 docker compose up -d
+services:
+  app:
+    build: .
+    env_file: server/.env
+    environment:
+      # Use the bundled database and the image's defaults regardless of what server/.env says
+      MONGODB_URI: mongodb://mongo:27017
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      - mongo
+    volumes:
+      - uploads:/app/server/resources/uploads
+      - logs:/app/server/resources/logs
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  uploads:
+  logs:

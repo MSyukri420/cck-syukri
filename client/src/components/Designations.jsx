@@ -355,7 +355,7 @@ const Designations = () => {
                     platformCtx.setAlert({type: "success", message: languageMap[platformCtx.language].designationDeleted});
                     setLoading(true); // to refetch the designation list
                 } else {
-                    platformCtx.setAlert({type: "danger", message: languageMap[platformCtx.language].deleteFailed});
+                    platformCtx.setAlert({type: "danger", message: data.message || languageMap[platformCtx.language].deleteFailed});
                 }
                 modalRef.current.closeModal();
             } catch (error) {

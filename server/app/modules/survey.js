@@ -3,11 +3,17 @@ const SurveyResponse = require('../models/SurveyResponse');
 const User = require('../models/User');
 const Designation = require('../models/Designation');
 const {createSurveyPdf, createEmailTemplate, sendMail} = require("../functions");
-const {kJWT_SECRET, kBASE_URL, kNODE_ENV} = require("../../constants");
+const {kJWT_SECRET, kAPP_URL} = require("../../constants");
 const jwt = require("jsonwebtoken");
 const jszip = require("jszip");
 const path = require("path");
 const fs = require("fs");
+const {t} = require("../i18n");
+
+// A survey response is visible to the person who answered it and to staff who manage surveys
+const canViewResponse = (res, response) =>
+    String(response.user?._id || response.user) === String(res.locals.user._id) ||
+    res.locals.userPermissions.some((permission) => permission.name === "survey" || permission.module === "survey");
 
 module.exports = {
     createSurvey: async (req, res) => {
@@ -151,9 +157,9 @@ module.exports = {
                                         hour: "numeric",
                                         minute: "numeric",
                                     })}.</p>
-                                <p>Alternatively, you can click this link for an express survey fill up through this <a href="http://${kNODE_ENV === "production"? kBASE_URL : "localhost:3001"}/respond?token=${token}">link</a>.</p>
+                                <p>Alternatively, you can click this link for an express survey fill up through this <a href="${kAPP_URL}/respond?token=${token}">link</a>.</p>
                                 <p style="margin-top: 50px;">If the link above doesn't work, you may copy and paste this link below:</p>
-                                <p style="text-align: center; margin-top: 25px">http://${kNODE_ENV === "production"? kBASE_URL : "localhost:3001"}/respond?token=${token}</p>
+                                <p style="text-align: center; margin-top: 25px">${kAPP_URL}/respond?token=${token}</p>
                             `);
 
                             let sendMailAction = await sendMail(employee.email, "Survey Notification", employeeCallToActionTemplate);
@@ -221,6 +227,10 @@ module.exports = {
 
             let campaignEndDate = campaign.campaignEndDate;
 
+            if (new Date() < campaign.campaignStartDate) {
+                return res.status(400).json({success: false, message: t(req, "surveyNotStarted")});
+            }
+
             if (new Date() > campaignEndDate) {
                 return res.status(400).json({success: false, message: "Campaign has ended"});
             }
@@ -253,6 +263,8 @@ module.exports = {
                 user: user._id,
                 responses,
                 completed: true
+            }).catch(e => {
+                console.error(e);
             });
 
             return res.status(200).json({success: true, message: "Survey response submitted"});
@@ -425,14 +437,19 @@ module.exports = {
                     .populate("jobGrade")
                     .lean();
 
+                // This route has no login middleware, so use the user resolved from the cookie above
                 survey = await Survey.findOne({
                     _id: surveyId,
-                    employees: res.locals.user._id
+                    employees: userData._id
                 }).lean();
             }
 
             if (!survey) {
                 return res.status(404).json({success: false, message: "Survey not found"});
+            }
+
+            if (new Date() < survey.campaignStartDate) {
+                return res.status(400).json({success: false, message: t(req, "surveyNotStarted")});
             }
 
             // Check if user has already responded
@@ -466,6 +483,10 @@ module.exports = {
 
             if (!response) {
                 return res.status(404).json({success: false, message: "Survey response not found"});
+            }
+
+            if (!canViewResponse(res, response)) {
+                return res.status(403).json({success: false, message: t(req, "accessDenied")});
             }
 
             return res.status(200).json({success: true, response});
@@ -603,8 +624,13 @@ module.exports = {
         try {
             const {surveyId, userId} = req.body;
 
+            // A token lets its holder answer as that user, so only issue one for yourself
+            if (userId && userId !== res.locals.user._id.toString()) {
+                return res.status(403).json({success: false, message: t(req, "surveyAsYourself")});
+            }
+
             const user = await User
-                .findById(userId, "-password")
+                .findById(res.locals.user._id, "-password")
                 .populate("department")
                 .populate("designation")
                 .populate("jobGrade")
@@ -656,6 +682,14 @@ module.exports = {
             let campaignStartDateObject = new Date(campaignStartDate);
             let campaignEndDateObject = new Date(campaignEndDate);
 
+            // Responses are matched to questions, so once people have answered, the questions are fixed.
+            // Name, description and dates can still change, and existing responses are kept.
+            const questionText = (list) => JSON.stringify((list || []).map((q) => [q.question, q.low, q.high]));
+            const responseCount = await SurveyResponse.countDocuments({campaign: campaignId});
+            if (responseCount > 0 && questionText(campaign.questions) !== questionText(questions)) {
+                return res.status(409).json({success: false, message: t(req, "surveyQuestionsLocked", {count: responseCount})});
+            }
+
             campaign.campaignName = campaignName;
             campaign.campaignDescription = campaignDescription;
             campaign.campaignStartDate = campaignStartDateObject;
@@ -663,9 +697,6 @@ module.exports = {
             campaign.questions = questions;
 
             await campaign.save();
-
-            // Clear survey responses
-            await SurveyResponse.deleteMany({campaign: campaignId});
 
             (async () => {
                 // Get employees by their id
@@ -769,9 +800,9 @@ module.exports = {
                             hour: "numeric",
                             minute: "numeric",
                         })}.</p>
-                                <p>Alternatively, you can click this link for an express survey fill up through this <a href="http://${kNODE_ENV === "production"? kBASE_URL : "localhost:3001"}/respond?token=${token}">link</a>.</p>
+                                <p>Alternatively, you can click this link for an express survey fill up through this <a href="${kAPP_URL}/respond?token=${token}">link</a>.</p>
                                 <p style="margin-top: 50px;">If the link above doesn't work, you may copy and paste this link below:</p>
-                                <p style="text-align: center; margin-top: 25px">http://${kNODE_ENV === "production"? kBASE_URL : "localhost:3001"}/respond?token=${token}</p>
+                                <p style="text-align: center; margin-top: 25px">${kAPP_URL}/respond?token=${token}</p>
                             `);
 
                         let sendMailAction = await sendMail(employee.email, "Survey Notification", employeeCallToActionTemplate);
@@ -787,6 +818,8 @@ module.exports = {
                 await Promise.all(leads.map((lead) => lead.save()));
             })().then(() => {
                 console.log("Sent notifications to intended recipients");
+            }).catch((e) => {
+                console.error(e);
             });
 
             return res.status(200).json({success: true, message: "Survey updated"});
@@ -812,17 +845,27 @@ module.exports = {
                 return res.status(404).json({ success: false, message: "Response not found" });
             }
 
+            if (!canViewResponse(res, response)) {
+                return res.status(403).json({ success: false, message: t(req, "accessDenied") });
+            }
+
             let pdf = response.pdf;
 
-            // Get pdf file path
-            let pdfPath = path.resolve(process.cwd(), "resources/uploads", pdf);
+            // Get pdf file path; responses whose PDF was never generated have no file name, so the
+            // existence check below fails and a new PDF is created
+            let pdfPath = path.resolve(process.cwd(), "resources/uploads", pdf || "no-pdf-yet");
     
             // Check if the file exists
             fs.access(pdfPath, fs.constants.F_OK, async (err) => {
                 if (err) {
                     console.error(`File ${pdfPath} does not exist, creating new one`);
-                   pdf = await createSurveyPdf(response.user, response.campaign, response);
-                   pdfPath = path.resolve(process.cwd(), "resources/uploads", pdf);
+                    try {
+                        pdf = await createSurveyPdf(response.user, response.campaign, response);
+                        pdfPath = path.resolve(process.cwd(), "resources/uploads", pdf);
+                    } catch (e) {
+                        console.error(e);
+                        return res.status(500).json({ success: false, message: "Could not get survey pdf." });
+                    }
                 }
     
                 // Create a read stream

@@ -1,6 +1,8 @@
 const Designation = require("../models/Designation");
 const Department = require("../models/Department");
 const User = require("../models/User");
+const JobGrade = require("../models/JobGrade");
+const {t} = require("../i18n");
 
 module.exports = {
     // Define an asynchronous function named getDesignations, which takes req (request) and res (response) as parameters.
@@ -115,6 +117,15 @@ module.exports = {
         // Destructure value from the request body: designationId.
         const { designationId } = req.body;
         try {
+            // Refuse while employees or job grades still use it, so nothing is left pointing at a missing designation
+            const [employees, jobGrades] = await Promise.all([
+                User.countDocuments({ designation: designationId }),
+                JobGrade.countDocuments({ designation: designationId }),
+            ]);
+            if (employees > 0 || jobGrades > 0) {
+                return res.json({ success: false, message: t(req, "designationInUse", { employees, jobGrades }) });
+            }
+
             // Use the Designation model to find and delete the designation by its ID.
             await Designation.findByIdAndDelete(designationId);
 

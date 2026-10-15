@@ -1,6 +1,8 @@
 const jobgrade = require("../models/JobGrade");
 const department = require("../models/Department");
 const designation = require("../models/Designation");
+const User = require("../models/User");
+const {t} = require("../i18n");
 
 module.exports = {
     getJobgradeById: async (req, res) => {
@@ -112,6 +114,13 @@ module.exports = {
     deleteJobgrade: async (req, res) => {
         try {
             const jobGradeId = req.body.jobGradeId;
+
+            // Employees need a job grade to be appraised, so refuse while any still have this one
+            const employees = await User.countDocuments({ jobGrade: jobGradeId });
+            if (employees > 0) {
+                return res.json({ success: false, message: t(req, "jobGradeInUse", { employees }) });
+            }
+
             await jobgrade.deleteOne({ _id: jobGradeId });
             res.json({ success: true, message: "Job grade deleted successfully." });
         } catch (error) {

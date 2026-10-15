@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const User = require('./app/models/User');
 const Role = require('./app/models/Role');
 const Permission = require('./app/models/Permission');
@@ -16,6 +17,30 @@ class Bootstrap {
         const bootstrap = new Bootstrap();
         await bootstrap.initializePermissions();
         await bootstrap.initializeRoles();
+
+        // Updates for databases created by older versions of the default roles
+        await bootstrap.runOnce("employee-cannot-manage-appraisals", async () => {
+            const permission = await Permission.findOne({name: "performance_appraisal"}).lean();
+            if (!permission) return;
+            const {modifiedCount} = await Role.updateOne({name: "Employee"}, {$pull: {permissions: permission._id}});
+            if (modifiedCount) console.log("Removed appraisal management from the Employee role");
+        });
+        await bootstrap.runOnce("hr-gets-appraisals-table", async () => {
+            const permission = await Permission.findOne({name: "appraisals_table"}).lean();
+            if (!permission) return;
+            const {modifiedCount} = await Role.updateOne({name: "HR"}, {$addToSet: {permissions: permission._id}});
+            if (modifiedCount) console.log("Added the recent appraisals table to the HR role");
+        });
+    }
+
+    // Runs an update once per database, recorded in "_migrations", so a later deliberate change
+    // by an admin in Roles & Permissions is not undone on the next restart
+    async runOnce(migrationId, update) {
+        const migrations = mongoose.connection.db.collection("_migrations");
+        if (await migrations.findOne({_id: migrationId})) return;
+
+        await update();
+        await migrations.insertOne({_id: migrationId, appliedAt: new Date()});
     }
 
     async initializePermissions() {
@@ -74,16 +99,16 @@ class Bootstrap {
         ];
 
         const hrRoles = [
-            "own_appraisals_table", "employees_table", "appraisal_table", "indicators_table",
+            "own_appraisals_table", "employees_table", "appraisals_table", "indicators_table",
             "survey_table", "employees_graph", "appraisals_graph", "department_graph",
             "topPerformers_graph", "update_csv",
             "edit_hr", "view_profile", "all_department", "performance_appraisal",
             "view_appraisal", "performance_indicator", "survey",
         ];
 
+        // Employees view and comment on their own appraisals but cannot create or manage them
         const employeeRoles = [
             "own_appraisals_table", "employees_table", "view_profile", "own_department",
-            "performance_appraisal",
         ];
 
         const hodRoles = [

@@ -118,7 +118,8 @@ function EditEmployee({ employee, onClose, onUpdateSuccess }) {
             birthday: employee.birthday ? new Date(employee.birthday).toISOString().split('T')[0] : '',
             address: employee.address || '',
             gender: employee.gender || '',
-            profilePicture: employee.profilePicturePath || null
+            // Preview through the avatar endpoint; uploaded files themselves are not served publicly
+            profilePicture: employee.profilePicture ? `${axios.defaults.baseURL}/avatars/${employee.employeeId}` : null
         });
         fetchDropdownData();
     }, [employee]);

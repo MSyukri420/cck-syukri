@@ -2,6 +2,19 @@ const express = require("express");
 const router = express.Router();
 const { upload } = require('./functions');
 
+// Express 4 does not catch rejected promises from async handlers, which crashes the process.
+// Wrap every handler so errors are forwarded to the error handler in index.js instead.
+for (const method of ["get", "post", "put", "delete"]) {
+    const register = router[method].bind(router);
+    router[method] = (path, ...handlers) => register(path, ...handlers.map((handler) => (req, res, next) => {
+        try {
+            return Promise.resolve(handler(req, res, next)).catch(next);
+        } catch (e) {
+            next(e);
+        }
+    }));
+}
+
 const start = require("./modules/start");
 const user = require("./modules/user");
 const department = require("./modules/department");
@@ -28,8 +41,8 @@ router.get("/admin/stop-impersonate", user.needsLogin([]), user.stopImpersonate)
 
 router.post("/login", user.postLogin);
 router.get('/logout', user.logout);
-router.get("/register", user.register);
-router.post("/register", user.postRegister);
+router.get("/register", user.needsLogin(['add_form']), user.register);
+router.post("/register", user.needsLogin(['add_form']), user.postRegister);
 router.post('/change-password', user.needsLogin([]), user.changePassword);
 router.post('/forgot-password', user.forgotPassword);
 router.post('/reset-password/:token', user.resetPassword);
@@ -42,9 +55,9 @@ router.get("/dashboard-graphs", user.needsLogin(['dashboard']), user.dashboardGr
 router.get("/employees-list", user.needsLogin(['employees_list']), start.employeeList);
 router.get("/employees-list/search", user.needsLogin(['employees_list']), start.employeeList);
 router.post("/add-user", user.needsLogin(['add_form']), start.addUser);
-router.post("/add-user-csv", upload.single('csvfile'), start.addUserCSV);
-router.post("/update-user", upload.single('profilePicture'), start.updateUser);
-router.post("/update-users-csv", upload.single('csvfile'), start.updateUsersCSV);
+router.post("/add-user-csv", user.needsLogin(['add_csv']), upload.single('csvfile'), start.addUserCSV);
+router.post("/update-user", user.needsLogin([]), upload.single('profilePicture'), start.updateUser);
+router.post("/update-users-csv", user.needsLogin(['update_csv']), upload.single('csvfile'), start.updateUsersCSV);
 router.post("/delete-user", user.needsLogin(['delete']), start.deleteUser);
 
 router.get("/departments", user.needsLogin(['department']), department.departments);
@@ -63,7 +76,6 @@ router.post("/designation/delete", user.needsLogin(['designation']), designation
 router.get("/designation/users/:designationId", user.needsLogin(['designation']), designation.getUsersByDesignation);
 
 router.get("/attributes", user.needsLogin(['performance_indicator']), attribute.attributes);
-router.post("/attributes/add", user.needsLogin(['performance_indicator']), attribute.addAttribute)
 router.post("/attributes/edit", user.needsLogin(['performance_indicator']), attribute.editAttribute);
 router.post("/attributes/delete", user.needsLogin(['performance_indicator']), attribute.deleteAttribute);
 router.get("/attributes/used-percentage", user.needsLogin(['performance_indicator']), attribute.getUsedPercentage);
@@ -94,7 +106,6 @@ router.get("/jobgrade/check/:jobGradeName", user.needsLogin(['jobgrade']), jobgr
 router.get("/get-appraisals-list", user.needsLogin(['performance_appraisal']), newPerformanceAppraisal.getAppraisals);
 router.get("/get-appraisals-list/:employeeId?", user.needsLogin([]), newPerformanceAppraisal.getAppraisals);
 router.get("/get-appraisal-details/:performanceAppraisalId", user.needsLogin(["own_appraisals_table", "appraisals_table", "performance_appraisal"]), newPerformanceAppraisal.getAppraisalInfo);
-router.post("/create-designation", user.needsLogin(['designation']), newPerformanceAppraisal.createDesignation);
 router.post("/create-attribute", user.needsLogin(['performance_indicator']), newPerformanceAppraisal.createAttribute);
 router.get("/get-employee-names", user.needsLogin(['performance_appraisal']), newPerformanceAppraisal.getEmployeeNames);
 router.get("/get-employee-details/:employeeId", user.needsLogin(['performance_appraisal']), newPerformanceAppraisal.getEmployeeDetails);
@@ -102,24 +113,26 @@ router.post("/create-appraisal", user.needsLogin(['performance_appraisal']), new
 router.post("/update-appraisal", user.needsLogin(['performance_appraisal']), newPerformanceAppraisal.updateAppraisal);
 router.get("/print-appraisal/:performanceAppraisalId", user.needsLogin(["own_appraisals_table", "appraisals_table", "performance_appraisal"]), newPerformanceAppraisal.downloadAppraisalPdf);
 router.post("/delete-appraisal", user.needsLogin(['performance_appraisal']), newPerformanceAppraisal.deleteAppraisal);
-router.post("/set-employee-comment", user.needsLogin(['performance_appraisal']), newPerformanceAppraisal.setEmployeeComment);
+// Employees comment on their own appraisal; the handler checks ownership
+router.post("/set-employee-comment", user.needsLogin([]), newPerformanceAppraisal.setEmployeeComment);
 
 router.get("/apikey-settings", user.needsLogin(['apikey_setting']), apikey.settings);
 router.post("/apikey-settings", user.needsLogin(['apikey_setting']), apikey.settings);
 router.delete("/apikey-settings", user.needsLogin(['apikey_setting']), apikey.settings);
 
-router.post("/create-survey", user.needsLogin([]), survey.createSurvey);
-router.get("/survey", user.needsLogin([]), survey.getSurveysList);
+// Managing surveys needs the 'survey' permission; answering and viewing your own response only needs login
+router.post("/create-survey", user.needsLogin(['survey']), survey.createSurvey);
+router.get("/survey", user.needsLogin(['survey']), survey.getSurveysList);
 router.get("/own-survey/:userId?", user.needsLogin([]), survey.getOwnSurveys);
-router.get("/survey/:surveyId", user.needsLogin([]), survey.getSurvey);
-router.get("/survey/:surveyId/status", user.needsLogin([]), survey.getSurveyStatus);
-router.get("/survey/:surveyId/stats", user.needsLogin([]), survey.getSurveyStats);
+router.get("/survey/:surveyId", user.needsLogin(['survey']), survey.getSurvey);
+router.get("/survey/:surveyId/status", user.needsLogin(['survey']), survey.getSurveyStatus);
+router.get("/survey/:surveyId/stats", user.needsLogin(['survey']), survey.getSurveyStats);
 router.get("/survey-response/:responseId", user.needsLogin([]), survey.getSurveyResponse);
 router.post("/survey-response/token", user.needsLogin([]), survey.generateLoginlessSurveyToken);
-router.post("/update-survey", user.needsLogin([]), survey.updateSurvey);
+router.post("/update-survey", user.needsLogin(['survey']), survey.updateSurvey);
 router.get("/survey-response/:responseId/print", user.needsLogin([]), survey.getSurveyPdf);
-router.get("/survey/:surveyId/get-all-responses", user.needsLogin([]), survey.getSurveyRecords);
-router.post("/survey/delete", user.needsLogin([]), survey.deleteSurvey);
+router.get("/survey/:surveyId/get-all-responses", user.needsLogin(['survey']), survey.getSurveyRecords);
+router.post("/survey/delete", user.needsLogin(['survey']), survey.deleteSurvey);
 router.get("/respond-to-survey/:surveyId?", survey.getPreparedSurvey);
 router.post("/create-survey-response", survey.createSurveyResponse);
 

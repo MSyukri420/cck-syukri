@@ -10,8 +10,12 @@ const path = require('path');
 const crypto = require("crypto");
 const PerformanceAppraisal = require('./models/PerformanceAppraisal');
 const SurveyResponse = require('./models/SurveyResponse');
-const {kJWT_SECRET, kAPP_NAME, kBASE_URL} = require("../constants");
+const {kJWT_SECRET, kAPP_NAME, kAPP_URL, kPORT, kEMAIL_FROM, kSMTP_USER, kEMAIL_USERNAME} = require("../constants");
+
+// PDFs are rendered by Puppeteer on this machine, so their assets are loaded from this server directly
+const kPDF_ASSETS_URL = `http://127.0.0.1:${kPORT}/assets`;
 const User = require("./models/User");
+const Department = require("./models/Department");
 
 handlebars.registerHelper('eq', (arg1, arg2) => arg1 === arg2);
 handlebars.registerHelper('add', (arg1, arg2) => parseInt(arg1) + parseInt(arg2));
@@ -46,14 +50,19 @@ const createSessionToken = async (username) => {
     return await jwt.sign({username: username}, kJWT_SECRET, {expiresIn: '1d'});
 }
 
+// Returns null for malformed, tampered or expired tokens so callers can respond with 401
 const verifySessionToken = async (sessionToken) => {
-    return jwt.verify(sessionToken, kJWT_SECRET);
+    try {
+        return jwt.verify(sessionToken, kJWT_SECRET);
+    } catch (e) {
+        return null;
+    }
 }
 
 const sendMail = async (email, subject, message, attachments = []) => {
     try {
         const info = await transporter.sendMail({
-            from: `${kAPP_NAME} <donotreply@${kBASE_URL}>`,
+            from: kEMAIL_FROM || `${kAPP_NAME} <${kSMTP_USER || kEMAIL_USERNAME}>`,
             to: email,
             subject: subject,
             html: message,
@@ -284,8 +293,8 @@ const createAppraisalPdf = async (employeeDetails, timePeriod, appraiserComments
 
         // Create html
         const html = template({
-            logoUrl: `http://${kBASE_URL}/assets/img/logo.png`,
-            stylesheet: `http://${kBASE_URL}/assets/css/template.css`,
+            logoUrl: `${kPDF_ASSETS_URL}/img/logo.png`,
+            stylesheet: `${kPDF_ASSETS_URL}/css/template.css`,
             employeeName: employeeDetails.name,
             dateJoined: employeeDetails.dateOfJoining,
             reviewPeriod: timePeriod,
@@ -314,10 +323,10 @@ const createAppraisalPdf = async (employeeDetails, timePeriod, appraiserComments
 }
 
 async function createNewPdf(html) {
-    try {
-        // Create puppeteer instance
-        let browser;
+    // Create puppeteer instance
+    let browser;
 
+    try {
         if(process.env.CHROME_BIN) {
             browser = await puppeteer.launch({
                 headless: true,
@@ -356,12 +365,10 @@ async function createNewPdf(html) {
             }
         });
 
-        // Close browser
-        await browser.close();
-
         return uuid;
-    } catch(e) {
-        throw e;
+    } finally {
+        // Close browser even when rendering fails, so Chromium processes do not pile up
+        if (browser) await browser.close();
     }
 }
 
@@ -377,7 +384,8 @@ async function createEmailTemplate(message) {
 
         // Create html
         return template({
-            logoUrl: `http://${kBASE_URL}/assets/img/logo.png`,
+            // Loaded by the recipient's email client, so it must be the public address
+            logoUrl: `${kAPP_URL}/assets/img/logo.png`,
             messageBody: message,
         });
     } catch (e) {
@@ -405,8 +413,8 @@ async function createSurveyPdf(employee, survey, surveyResponse) {
 
         // Create html
         const html = template({
-            logoUrl: `http://${kBASE_URL}/assets/img/logo.png`,
-            stylesheet: `http://${kBASE_URL}/assets/css/template.css`,
+            logoUrl: `${kPDF_ASSETS_URL}/img/logo.png`,
+            stylesheet: `${kPDF_ASSETS_URL}/css/template.css`,
             employee: employee,
             campaign: survey,
             campaignStartDate: new Date(survey.campaignStartDate).toLocaleDateString("en-my", {
@@ -441,6 +449,39 @@ async function createSurveyPdf(employee, survey, surveyResponse) {
     }
 }
 
+// Search boxes match typed text literally, so characters like "(" or "*" can't break or slow the query
+const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Permissions that let a role see other people's appraisals (the client shows the appraisal pages for these)
+const kAPPRAISAL_MANAGER_PERMISSIONS = ["performance_appraisal", "view_appraisal", "appraisals_table"];
+
+// Decides which appraisals the logged-in user may see or change. Everyone sees their own and the ones they
+// reviewed; appraisal managers also see others, limited to their department when they have 'own_department'.
+const appraisalAccess = async (res) => {
+    const user = res.locals.user;
+    const permissions = res.locals.userPermissions;
+    const isManager = permissions.some((permission) => kAPPRAISAL_MANAGER_PERMISSIONS.includes(permission.name));
+    const ownDepartmentOnly = permissions.some((permission) => permission.name === "own_department");
+    const department = ownDepartmentOnly && user.department ? await Department.findById(user.department).lean() : null;
+    // undefined = every department; null = scoped but the user has no department
+    const departmentName = ownDepartmentOnly ? (department?.departmentName ?? null) : undefined;
+    const isOwn = (appraisal) => String(appraisal.employeeId?._id || appraisal.employeeId) === String(user._id);
+    const inScope = (appraisalDepartment) => departmentName === undefined || (departmentName !== null && appraisalDepartment === departmentName);
+
+    return {
+        isManager,
+        departmentName,
+        departmentId: ownDepartmentOnly ? user.department || null : undefined,
+        inScope,
+        canView: (appraisal) =>
+            isOwn(appraisal) ||
+            String(appraisal.reviewedBy?._id || appraisal.reviewedBy) === String(user._id) ||
+            (isManager && inScope(appraisal.employeeDetails?.department)),
+        // Changing an appraisal also needs the route's 'performance_appraisal' permission; nobody edits their own
+        canManage: (appraisal) => isManager && !isOwn(appraisal) && inScope(appraisal.employeeDetails?.department),
+    };
+};
+
 const generateEmployeeId = async () => {
     let unique = false;
     let employeeId;
@@ -469,5 +510,7 @@ module.exports = {
     createAppraisalPdf,
     createSurveyPdf,
     createEmailTemplate,
-    generateEmployeeId
+    generateEmployeeId,
+    escapeRegex,
+    appraisalAccess,
 };

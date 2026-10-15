@@ -5,8 +5,10 @@ const PerformanceAppraisal = require("../models/PerformanceAppraisal");
 const Role = require('../models/Role');
 const JobGrade = require('../models/JobGrade');
 const Permission = require('../models/Permission');
-const {hashPassword, parseCSV, getNewPerformanceAppraisalStats} = require("../functions");
+const fs = require("fs");
+const {hashPassword, parseCSV, getNewPerformanceAppraisalStats, escapeRegex, appraisalAccess} = require("../functions");
 const {kBASE_URL} = require("../../constants");
+const {t} = require("../i18n");
 
 const generateEmployeeId = async () => {
     let unique = false;
@@ -215,8 +217,18 @@ module.exports = {
 
             let performanceAppraisals = [];
 
+            // Others' appraisals only for appraisal managers, and within their department when limited to it
+            const access = await appraisalAccess(res);
+            if (employeeId && employeeId !== res.locals.user.employeeId && !access.isManager) {
+                return res.status(403).json({success: false, message: t(req, "ownAppraisalsOnly")});
+            }
+
             if(employeeId) {
-                let user = await User.findOne({ employeeId: employeeId });
+                let user = await User.findOne({ employeeId: employeeId }).populate("department", "departmentName");
+
+                if (user && employeeId !== res.locals.user.employeeId && !access.inScope(user.department?.departmentName)) {
+                    return res.status(403).json({success: false, message: t(req, "departmentAppraisalsOnly")});
+                }
 
                 if(user) {
                     performanceAppraisals = await PerformanceAppraisal.find({ employeeId: user._id })
@@ -355,7 +367,7 @@ module.exports = {
                 }
     
                 row.employeeId = await generateEmployeeId();
-                row.password = await hashPassword(row.password);
+                // row.password stays plain; the User pre-save hook hashes it on create
                 row.department = null;
                 row.designation = null;
     
@@ -395,6 +407,9 @@ module.exports = {
         } catch (error) {
             console.error("CSV Parsing Error:", error);
             return res.status(500).json({ success: false, error: 'Error parsing CSV file.' });
+        } finally {
+            // The upload holds plain-text passwords, so don't keep it once it's processed
+            fs.unlink(csvPath, () => {});
         }
     },      
     
@@ -402,6 +417,7 @@ module.exports = {
     addUser: async function (req, res) {
         let users = req.body.users;
         const errors = [];
+        const createdUsers = [];
     
         if (!Array.isArray(users)) {
             users = [users];
@@ -557,6 +573,9 @@ module.exports = {
         } catch (error) {
             console.error('Error processing CSV:', error);
             return res.status(500).json({ success: false, error: 'An error occurred while processing the CSV file.' });
+        } finally {
+            // Uploaded CSVs hold personal details, so don't keep them once processed
+            fs.unlink(csvPath, () => {});
         }
     },    
 
@@ -565,22 +584,61 @@ module.exports = {
         let { username, name, email, phone, department, designation, role, jobGrade, birthday, address, gender, profilePicture, employeeId } = req.body;
     
         try {
+            const editor = res.locals.user;
+            const isSelf = employeeId === editor.employeeId;
+            const isEditorSuperAdmin = editor.role.name === 'Super Admin';
+            const canEditOthers = res.locals.userPermissions.some(permission =>
+                ['edit_all', 'edit_admin', 'edit_hr'].includes(permission.name)
+            );
+
+            if (!isSelf && !canEditOthers) {
+                return res.status(403).json({ success: false, message: t(req, 'accessDenied') });
+            }
+
+            const target = await User.findOne({ employeeId: employeeId }).populate('role', 'name').lean();
+            if (!target) {
+                return res.status(404).json({ success: false, message: 'User not found' });
+            }
+
+            // Only a Super Admin may edit a Super Admin account or hand out the Super Admin role
+            if (!isEditorSuperAdmin) {
+                const newRole = role ? await Role.findById(role).lean() : null;
+                if (target.role?.name === 'Super Admin' || newRole?.name === 'Super Admin') {
+                    return res.status(403).json({ success: false, message: t(req, 'accessDenied') });
+                }
+            }
+
+            // Personal details anyone may change on their own profile
             let updateData = {
-                username,
                 name,
                 email,
                 phone,
-                department: department || null,
-                designation: designation || null,
-                role: role || null,
-                jobGrade: jobGrade || null,
                 birthday,
                 address,
                 gender,
                 profilePicture,
-                ...(req.body.password && { password: req.body.password }),
             };
-    
+
+            // Account and organisation fields need an edit permission
+            if (canEditOthers) {
+                Object.assign(updateData, {
+                    username,
+                    department: department || null,
+                    designation: designation || null,
+                    jobGrade: jobGrade || null,
+                });
+
+                // Nobody but a Super Admin may change their own role
+                if (!isSelf || isEditorSuperAdmin) {
+                    updateData.role = role || null;
+                }
+
+                // Only a Super Admin may set someone's password; findOneAndUpdate skips the pre-save hook, so hash here
+                if (req.body.password && isEditorSuperAdmin) {
+                    updateData.password = await hashPassword(req.body.password);
+                }
+            }
+
             if (req.file) {
                 updateData.profilePicture = req.file.filename;
             }
@@ -625,19 +683,19 @@ module.exports = {
     
         const superAdminRole = await Role.findOne({ name: 'Super Admin' }).lean();
         const superAdminRoleId = superAdminRole._id;
-        let filter;
+        let filter = {};
         if (user.role.name !== 'Super Admin') {
-            filter = { role: { $ne: superAdminRoleId } };
+            filter.role = { $ne: superAdminRoleId };
         }
 
         const departmentPermission = checkDepartmentPermission(user);
         if (departmentPermission) {
             filter.department = user.department; 
             if (employeeId) filter.employeeId = employeeId;
-            if (employeeName) filter.name = new RegExp(employeeName, 'i'); 
+            if (employeeName) filter.name = new RegExp(escapeRegex(employeeName), 'i'); 
         } else {
             if (employeeId) filter.employeeId = employeeId;
-            if (employeeName) filter.name = new RegExp(employeeName, 'i'); 
+            if (employeeName) filter.name = new RegExp(escapeRegex(employeeName), 'i'); 
             if (req.query.role) {
                 const role = await Role.findOne({ name: req.query.role }).lean();
                 if (role) filter.role = role._id;
@@ -786,7 +844,18 @@ module.exports = {
 
     deleteRole: async function (req, res) {
         try {
-            const roleId = req.params.roleId; 
+            const roleId = req.params.roleId;
+
+            // Users on a deleted role could no longer log in, so refuse while the role is in use
+            const role = await Role.findById(roleId).lean();
+            if (role?.name === 'Super Admin') {
+                return res.status(400).send({ success: false, message: t(req, "superAdminRoleProtected") });
+            }
+            const usersWithRole = await User.countDocuments({ role: roleId });
+            if (usersWithRole > 0) {
+                return res.status(400).send({ success: false, message: t(req, "roleInUse", { users: usersWithRole }) });
+            }
+
             const deletedRole = await Role.findByIdAndDelete(roleId);
             if (!deletedRole) {
                 return res.status(404).send({ message: 'Role not found' });

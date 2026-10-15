@@ -121,6 +121,10 @@ const SurveyQuestionnaire = () => {
                 }
             } catch (error) {
                 console.error('Error submitting survey:', error);
+                // e.g. the questions can't change once people have answered
+                if (error.response?.data?.message) {
+                    platformCtx.setAlert({message: error.response.data.message, type: 'danger'});
+                }
             }
         }
 
