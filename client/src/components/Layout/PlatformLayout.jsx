@@ -188,13 +188,14 @@ export const PlatformHeader = ({ setIsClicked }) => {
                             </div>
                             <div className="flex flex-row gap-4 items-center">
                                 <p className="px-2 py-1 bg-white bg-opacity-20 rounded-full text-white text-sm">{getFormattedDate()}</p>
-                                <div className="w-36">
+                                <div className="min-w-36">
                                     <Dropdown header={
                                         <div className="flex flex-row items-center gap-4">
                                             <img
                                                 src={`${axios.defaults.baseURL}/avatars/${user.employeeId}`}
                                                 alt="avatar" className="rounded-full object-cover w-8 h-8"/>
-                                            <p className="text-white text-sm font-medium">{userName}</p>
+                                            {/* One line, so long names don't make the top bar taller and hide the page title */}
+                                            <p className="text-white text-sm font-medium whitespace-nowrap">{userName}</p>
                                             <button onClick={handleExpand}>
                                                 {!isExpand ? (
                                                     <span

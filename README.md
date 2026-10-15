@@ -4,6 +4,8 @@
 
 HR sets the scoring criteria for each designation and job grade. Heads of department appraise their staff, employees read and comment on their own results, and every appraisal can be downloaded as a PDF. It deploys as a single Node.js app, or with one Docker command that includes the database.
 
+![HR dashboard: the top five performers, each score split into Know-How, Problem-Solving and Accountability (demo data)](docs/images/dashboard.png)
+
 ## What it does
 
 - **Everyone in a role is scored the same way.** Each job grade splits 100% across Know-How, Problem-Solving and Accountability, and each criterion's sub-items are weighted to 100%. A total of 85 or more is an A, whoever gave it.
@@ -24,6 +26,13 @@ HR sets the scoring criteria for each designation and job grade. Heads of depart
 | Appraisals | Surveys | Administration |
 |---|---|---|
 | Score an employee against the criteria for their designation and job grade. The total and grade (A–E) are worked out for you, the employee can add a comment, and the result downloads as a PDF. | Build a campaign with your own questions and rating labels, pick the employees, and follow who has responded. Download every response as PDFs in one zip. | Manage departments, designations, job grades and employees (one at a time or by CSV), and choose what each role can see and do. |
+
+<p>
+  <img src="docs/images/appraisal.png" alt="An appraisal: total score and grade, appraiser and employee comments, and the score for each category" width="49%">
+  <img src="docs/images/survey-results.png" alt="Survey results: average, lowest and highest rating per question, next to one employee's answers" width="49%">
+</p>
+
+The screenshots use generated demo data with fictional people.
 
 ## Run it
 

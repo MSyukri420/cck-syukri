@@ -165,6 +165,7 @@ The script records every inserted id in a `_mockseed` collection, so clearing re
 package.json                root scripts: dev, build, start, install:all, seed:mock
 Dockerfile                  builds the client and server into one image
 docker-compose.yml          the app plus MongoDB
+docs/images/                screenshots used in the README (demo data)
 client/                     React app (Vite, Tailwind CSS)
   src/App.jsx               page routes
   src/components/           pages and shared components
@@ -211,6 +212,7 @@ Nothing from the code review remains open. Points to be aware of:
   - **Roles**: employees can no longer create, edit or delete appraisals or manage surveys, and survey responses are private to the person who answered and to survey managers. Existing databases are updated once on startup.
   - **Appraisal access**: everyone sees only their own appraisals and the ones they reviewed; heads of department see and appraise only their department, and nobody can appraise themselves.
   - **Follow-up fixes**: login limits are stored in MongoDB, so they survive restarts and apply across servers; server messages follow the language chosen in Settings; the default HR role's `appraisal_table` typo is fixed (existing databases are updated once); and the unused `POST /api/attributes/add` and `POST /api/create-designation` endpoints are removed.
+  - **Display fixes**: the dashboard's top performers rank people rather than appraisals, so nobody appears twice; long names no longer push the page title under the top bar; and appraisals show a formatted, labelled join date.
   - **Former known issues**: survey edits keep their responses, surveys can't be answered before they start, only a Super Admin can set someone's password, failed logins and reset emails are rate limited, reset tokens are stored hashed, searches treat typed text literally, imported CSVs are deleted after use, criteria delete on a standalone MongoDB, departments, designations, job grades and roles can't be deleted while in use, department dashboards show only that department, and the profile picture preview works again.
   - **Deployment**: the server serves the website again, creates its default roles on first start, has one email setup and one `APP_URL` for links, and comes with `.env.example`, Docker Compose and mock data.
 - **Repository setup (August 2025).** The client and server were combined into this repository, and `server/index.js` was rewritten. The rewrite dropped three things the original did:

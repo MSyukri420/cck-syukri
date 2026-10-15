@@ -208,6 +208,7 @@ const ViewAppraisal = () => {
             department: "Department",
             designation: "Designation",
             jobGrade: "Job Grade",
+            dateJoined: "Date Joined",
             reviewPeriod: "Review Period",
             appraisalDate: "Appraisal Date",
             downloadPdf: "Download PDF",
@@ -243,6 +244,7 @@ const ViewAppraisal = () => {
             department: "Jabatan",
             designation: "Jawatan",
             jobGrade: "Gred Kerja",
+            dateJoined: "Tarikh Menyertai",
             reviewPeriod: "Tempoh Semakan",
             appraisalDate: "Tarikh Penilaian",
             downloadPdf: "Muat turun PDF",
@@ -279,6 +281,7 @@ const ViewAppraisal = () => {
             department: "部门",
             designation: "职位",
             jobGrade: "工作等级",
+            dateJoined: "入职日期",
             reviewPeriod: "审查期",
             appraisalDate: "评估日期",
             downloadPdf: "下载PDF",
@@ -398,7 +401,9 @@ const ViewAppraisal = () => {
                     </div>
                     <div className="flex flex-row gap-2">
                         <p className="font-medium">{languageMap[platformCtx.language].dateJoined}</p>
-                        <p>{appraisal.employeeDetails.dateOfJoining?? ""}</p>
+                        <p>{appraisal.employeeDetails.dateOfJoining
+                            ? new Date(appraisal.employeeDetails.dateOfJoining).toLocaleDateString(platformCtx.dateFormat || "en-my", {year: "numeric", month: "long", day: "numeric"})
+                            : ""}</p>
                     </div>
                 </div>
                 <div className="flex flex-col gap-2 text-sm w-full md:flex-1">

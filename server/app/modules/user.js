@@ -557,6 +557,8 @@ module.exports = {
         // Aggregate for top performers
         const topPerformers = await PerformanceAppraisal.aggregate([
             { $match: appraisalFilter }, // Apply filter here
+            // Newest first, so each employee's latest appraisal is the one kept below
+            { $sort: { appraisalDate: -1, createdAt: -1 } },
             {
                 $project: {
                     employeeId: 1,
@@ -590,7 +592,15 @@ module.exports = {
     
         // Calculate stats for each top performer and sort by total score; names and scores only for roles that show them
         const canSeeTopPerformers = res.locals.userPermissions.some(permission => permission.name === 'topPerformers_graph');
-        const topPerformersStats = (canSeeTopPerformers ? topPerformers : []).map(performanceAppraisal => {
+        // Rank people, not appraisals: one entry per employee, using their latest appraisal
+        const seenEmployees = new Set();
+        const latestPerEmployee = topPerformers.filter(appraisal => {
+            const id = String(appraisal.employeeId);
+            if (seenEmployees.has(id)) return false;
+            seenEmployees.add(id);
+            return true;
+        });
+        const topPerformersStats = (canSeeTopPerformers ? latestPerEmployee : []).map(performanceAppraisal => {
             const stats = getNewPerformanceAppraisalStats(performanceAppraisal);
             return {
                 ...performanceAppraisal,
